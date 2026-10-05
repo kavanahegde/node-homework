@@ -20,7 +20,13 @@ Node.js is commonly used for web servers, REST APIs, real-time applications, com
 
 **CommonJS (default in Node.js):**
 
-```js
-const fs = require('fs');
+    const fs = require('fs');
 
-module.exports = fs;      
+    module.exports = fs;
+
+**ES Modules (supported in modern Node.js):**
+
+    import fs from 'fs';
+
+    export default fs;
+    
