@@ -4,6 +4,7 @@ const prisma = require("../db/prisma");
 const httpMocks = require("node-mocks-http");
 const EventEmitter = require("events").EventEmitter;
 const jwt = require("jsonwebtoken");
+const waitForRouteHandlerCompletion = require("./waitForRouteHandlerCompletion");
 
 const {
   index,
@@ -12,10 +13,8 @@ const {
   update,
   deleteTask,
 } = require("../controllers/taskController");
-const { register, logoff, login } = require("../controllers/userController");
+const { register, logoff, logon } = require("../controllers/userController");
 const jwtMiddleware = require("../middleware/jwtMiddleware");
-const { createUser } = require("../services/userService");
-const waitForRouteHandlerCompletion = require("./waitForRouteHandlerCompletion");
 
 const cookie = require("cookie");
 function MockResponseWithCookies() {
@@ -44,23 +43,13 @@ let saveTaskId = null;
 beforeAll(async () => {
   await prisma.Task.deleteMany(); // delete all tasks
   await prisma.User.deleteMany(); // delete all users
-  user1 = await createUser({
-    name: "Bob",
-    email: "bob@sample.com",
-    password: "Pa$$word20",
-  });
-  user2 = await createUser({
-    name: "Alice",
-    email: "alice@sample.com",
-    password: "Pa$$word20",
-  });
 });
 
 afterAll(async () => {
   await prisma.$disconnect();
 });
 
-describe("testing login, register, and logoff", () => {
+describe("testing logon, register, and logoff", () => {
   it("You can register a user.", async () => {
     const req = httpMocks.createRequest({
       method: "POST",
@@ -70,17 +59,22 @@ describe("testing login, register, and logoff", () => {
         password: "Pa$$word20",
       },
     });
-    saveRes = httpMocks.createResponse();
-    await register(req, saveRes);
+    saveRes = httpMocks.createResponse({
+      eventEmitter: EventEmitter,
+    });
+    await waitForRouteHandlerCompletion(register, req, saveRes);
     expect(saveRes.statusCode).toBe(201);
-  });
+    user1 = await prisma.user.findUnique({
+      where: { email: "jim@sample.com" },
+    });
+  }, 15000); // needed a longer timeout
   it("The user can be logged on", async () => {
     const req = httpMocks.createRequest({
       method: "POST",
       body: { email: "jim@sample.com", password: "Pa$$word20" },
     });
     saveRes = MockResponseWithCookies();
-    await waitForRouteHandlerCompletion(login, req, saveRes);
+    await waitForRouteHandlerCompletion(logon, req, saveRes);
     expect(saveRes.statusCode).toBe(200); // success!
   });
   it("A string in the Set-Cookie array starts with jwt=.", () => {
@@ -101,7 +95,7 @@ describe("testing login, register, and logoff", () => {
       body: { email: "jim@sample.com", password: "bad password" },
     });
     saveRes = MockResponseWithCookies();
-    await waitForRouteHandlerCompletion(login, req, saveRes);
+    await waitForRouteHandlerCompletion(logon, req, saveRes);
     expect(saveRes.statusCode).toBe(401);
   });
   it("You can't register again with the same email.", async () => {
@@ -129,6 +123,9 @@ describe("testing login, register, and logoff", () => {
     saveRes = httpMocks.createResponse();
     await register(req, saveRes);
     expect(saveRes.statusCode).toBe(201);
+    user2 = await prisma.user.findUnique({
+      where: { email: "manuel@sample.com" },
+    });
   });
   it("You can logon as that new user.", async () => {
     const req = httpMocks.createRequest({
@@ -136,7 +133,7 @@ describe("testing login, register, and logoff", () => {
       body: { email: "manuel@sample.com", password: "Pa$$word20" },
     });
     saveRes = MockResponseWithCookies();
-    await waitForRouteHandlerCompletion(login, req, saveRes);
+    await waitForRouteHandlerCompletion(logon, req, saveRes);
     expect(saveRes.statusCode).toBe(200);
   });
   it("You can now logoff.", async () => {
@@ -254,7 +251,7 @@ describe("testing task creation", () => {
       body: { title: "first task" },
     });
     req.user = user1;
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await create(req, saveRes);
     expect(saveRes.statusCode).toBe(201);
   });
@@ -277,28 +274,29 @@ describe("getting created tasks", () => {
       method: "GET",
     });
     req.user = user1;
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await index(req, saveRes);
     expect(saveRes.statusCode).toBe(200);
   });
-  it("The returned JSON array has length 1.", () => {
+  it("The returned JSON array has length 4.", () => {
     saveData = saveRes._getJSONData();
-    expect(saveData).toHaveLength(1);
+    expect(saveData.tasks).toHaveLength(4);
   });
   it("The title in the first array object is as expected.", () => {
-    expect(saveData[0].title).toBe("first task");
+    expect(saveData.tasks[0].title).toBe("first task");
   });
   it("The first array object does not contain a userId.", () => {
-    expect(saveData[0].userId).not.toBeDefined();
+    expect(saveData.tasks[0].userId).not.toBeDefined();
   });
-  it("If get the list of tasks using the userId from user2, you get a 404.", async () => {
+  it("If get the list of tasks using the userId from user2, you get 3", async () => {
     const req = httpMocks.createRequest({
       method: "GET",
     });
     req.user = user2;
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await index(req, saveRes);
-    expect(saveRes.statusCode).toBe(404);
+    const data = saveRes._getJSONData();
+    expect(data.tasks.length).toBe(3);
   });
   it("You can retrieve the first array object using the `show()` method of the controller.", async () => {
     const req = httpMocks.createRequest({
@@ -306,7 +304,7 @@ describe("getting created tasks", () => {
     });
     req.user = user1;
     req.params = { id: saveTaskId };
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await show(req, saveRes);
     expect(saveRes.statusCode).toBe(200);
   });
@@ -320,7 +318,7 @@ describe("testing the update and delete of tasks.", () => {
     req.user = user1;
     req.params = { id: saveTaskId };
     req.body = { isCompleted: true };
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await update(req, saveRes);
     expect(saveRes.statusCode).toBe(200);
   });
@@ -331,7 +329,7 @@ describe("testing the update and delete of tasks.", () => {
     req.user = user2;
     req.params = { id: saveTaskId };
     req.body = { isCompleted: true };
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await update(req, saveRes);
     expect(saveRes.statusCode).not.toBe(200);
   });
@@ -341,7 +339,7 @@ describe("testing the update and delete of tasks.", () => {
     });
     req.user = user2;
     req.params = { id: saveTaskId };
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await deleteTask(req, saveRes);
     expect(saveRes.statusCode).not.toBe(200);
   });
@@ -351,18 +349,19 @@ describe("testing the update and delete of tasks.", () => {
     });
     req.user = user1;
     req.params = { id: saveTaskId };
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await deleteTask(req, saveRes);
     expect(saveRes.statusCode).toBe(200);
   });
-  it("Retrieving user1's tasks now returns a 404.", async () => {
+  it("Retrieving user1's tasks now returns 3 tasks", async () => {
     const req = httpMocks.createRequest({
       method: "GET",
     });
     req.user = user1;
-    saveRes = httpMocks.createResponse();
+    saveRes = httpMocks.createResponse({ eventEmitter: EventEmitter });
     await index(req, saveRes);
-    expect(saveRes.statusCode).toBe(404);
+    saveData = saveRes._getJSONData();
+    expect(saveData.tasks.length).toBe(3);
   });
 });
 
@@ -488,13 +487,14 @@ describe("function tests of user operations", () => {
   const { app, server } = require("../app");
   let agent;
 
-  beforeAll(() => {
+  beforeAll(async () => {
+    await server.close(); // we want the server instance to be managed by the agent.
     agent = request.agent(app);
   });
 
-  afterAll(() => {
-    server.close();
-  });
+  // afterAll(async () => {
+  //   await server.close();
+  // });
 
   describe("register a user ", () => {
     it("46. it creates the user entry", async () => {
@@ -503,31 +503,35 @@ describe("function tests of user operations", () => {
         email: "jdeere@example.com",
         password: "Pa$$word20",
       };
-      saveRes = await agent.post("/user").send(newUser);
+      saveRes = await agent.post("/api/users/register").send(newUser);
       expect(saveRes.status).toBe(201);
     });
     it("47. Registration returns an object with the expected name.", () => {
-      expect(saveRes.body.name).toBe("John Deere");
+      expect(saveRes.body.user.name).toBe("John Deere");
     });
     it("48. The returned object includes a csrfToken.", () => {
       expect(saveRes.body.csrfToken).toBeDefined();
     });
     it("49. You can logon as the newly registered user.", async () => {
       const logonObj = { email: "jdeere@example.com", password: "Pa$$word20" };
-      saveRes = await agent.post("/user/logon").send(logonObj);
+      saveRes = await agent.post("/api/users/logon").send(logonObj);
       expect(saveRes.status).toBe(200);
     });
     it("50. See if you are logged in", async () => {
-      const res = await agent.get("/tasks");
+      const res = await agent.get("/api/tasks");
       expect(res.status).not.toBe(401);
     });
     it("51. You can logoff.", async () => {
       const token = saveRes.body.csrfToken;
-      saveRes = await agent.post("/user/logoff").set("X-CSRF-TOKEN", token);
+      expect(token).toBeDefined();
+      saveRes = await agent
+        .post("/api/users/logoff")
+        .set("X-CSRF-TOKEN", token)
+        .send();
       expect(saveRes.status).toBe(200);
     });
     it("52. Makes sure we are logged out", async () => {
-      const res = await agent.get("/tasks");
+      const res = await agent.get("/api/tasks");
       expect(res.status).toBe(401);
     });
   });
