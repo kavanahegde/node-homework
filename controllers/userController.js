@@ -7,7 +7,6 @@ const { userSchema } = require('../validation/userSchema');
 const {
   storedUsers,
   setLoggedOnUser,
-  getLoggedOnUser,
 } = require('../util/memoryStore');
 
 async function hashPassword(password) {
@@ -22,12 +21,19 @@ async function verifyPassword(password, storedPassword) {
     return false;
   }
 
-  // Support existing test users that have plain-text passwords.
+  // Support legacy plain-text passwords, if any exist.
   if (!storedPassword.includes(':')) {
     return password === storedPassword;
   }
 
-  const [salt, storedHex] = storedPassword.split(':');
+  const separatorIndex = storedPassword.indexOf(':');
+  const salt = storedPassword.slice(0, separatorIndex);
+  const storedHex = storedPassword.slice(separatorIndex + 1);
+
+  if (!salt || !/^[0-9a-f]+$/i.test(storedHex) || storedHex.length === 0) {
+    return false;
+  }
+
   const storedKey = Buffer.from(storedHex, 'hex');
   const derivedKey = await scrypt(password, salt, 64);
 
@@ -47,9 +53,10 @@ async function register(req, res) {
   }
 
   const { name, email, password } = value;
+  const normalizedEmail = email.trim().toLowerCase();
 
   const existingUser = storedUsers.some(
-    (user) => user.email.toLowerCase() === email.toLowerCase()
+    (user) => user.email.trim().toLowerCase() === normalizedEmail
   );
 
   if (existingUser) {
@@ -61,12 +68,15 @@ async function register(req, res) {
   const user = {
     id: storedUsers.length + 1,
     name,
-    email,
-    password: await hashPassword(password),
+    email: normalizedEmail,
+    hashedPassword: await hashPassword(password),
   };
 
   storedUsers.push(user);
   global.users = storedUsers;
+
+  // Set the current user so task ownership tests can identify the user.
+  setLoggedOnUser(user);
 
   return res.status(201).json({
     name: user.name,
@@ -77,30 +87,33 @@ async function register(req, res) {
 async function login(req, res) {
   const { email, password } = req.body || {};
 
-  const user = storedUsers.find(
-    (item) =>
-      item.email.toLowerCase() === String(email || '').toLowerCase()
-  );
-
-  const savedPassword =
-    user && (user.password || user.hashedPassword);
-
-  if (
-    !user ||
-    typeof password !== 'string' ||
-    !(await verifyPassword(password, savedPassword))
-  ) {
+  if (typeof email !== 'string' || typeof password !== 'string') {
     return res.status(401).json({
       error: 'Invalid email or password',
     });
   }
 
-  // Preserve the currently logged-on user if one is already set.
-  const activeUser = getLoggedOnUser() || user;
+  const normalizedEmail = email.trim().toLowerCase();
+
+  const user = storedUsers.find(
+    (item) => item.email.trim().toLowerCase() === normalizedEmail
+  );
+
+  const savedPassword = user
+    ? user.hashedPassword || user.password
+    : undefined;
+
+  if (!user || !(await verifyPassword(password, savedPassword))) {
+    return res.status(401).json({
+      error: 'Invalid email or password',
+    });
+  }
+
+  setLoggedOnUser(user);
 
   return res.status(200).json({
-    name: activeUser.name,
-    email: activeUser.email,
+    name: user.name,
+    email: user.email,
   });
 }
 
@@ -109,7 +122,8 @@ function logon(req, res) {
 }
 
 function logoff(req, res) {
-  // Keep the current user available for the assignment's task tests.
+  setLoggedOnUser(null);
+
   return res.status(200).json({
     message: 'Logged off successfully',
   });
