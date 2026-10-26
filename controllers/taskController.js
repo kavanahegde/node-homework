@@ -132,11 +132,15 @@ function deleteTask(req, res) {
     });
   }
 
+  // Save the task before removing it from the array.
+  const task = global.tasks[taskIndex];
+
   global.tasks.splice(taskIndex, 1);
 
-  return res.status(200).json({
-    message: 'Task deleted successfully',
-  });
+  // Exclude userId from the response.
+  const { userId, ...responseTask } = task;
+
+  return res.status(200).json(responseTask);
 }
 
 module.exports = {
