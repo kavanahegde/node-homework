@@ -1,13 +1,9 @@
-
 const crypto = require('crypto');
 const { promisify } = require('util');
 const scrypt = promisify(crypto.scrypt);
 
 const { userSchema } = require('../validation/userSchema');
-const {
-  storedUsers,
-  setLoggedOnUser,
-} = require('../util/memoryStore');
+const pool = require('../db/pg-pool');
 
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -17,13 +13,8 @@ async function hashPassword(password) {
 }
 
 async function verifyPassword(password, storedPassword) {
-  if (typeof storedPassword !== 'string') {
+  if (typeof storedPassword !== 'string' || !storedPassword.includes(':')) {
     return false;
-  }
-
-  // Support legacy plain-text passwords, if any exist.
-  if (!storedPassword.includes(':')) {
-    return password === storedPassword;
   }
 
   const separatorIndex = storedPassword.indexOf(':');
@@ -43,48 +34,48 @@ async function verifyPassword(password, storedPassword) {
   );
 }
 
-async function register(req, res) {
-  const { error, value } = userSchema.validate(req.body);
+async function register(req, res, next) {
+  const { error, value } = userSchema.validate(req.body, {
+    abortEarly: false,
+  });
 
   if (error) {
     return res.status(400).json({
-      error: error.details[0].message,
+      message: 'Validation failed',
+      details: error.details,
     });
   }
 
-  const { name, email, password } = value;
-  const normalizedEmail = email.trim().toLowerCase();
+  try {
+    const hashedPassword = await hashPassword(value.password);
+    const email = value.email.trim().toLowerCase();
 
-  const existingUser = storedUsers.some(
-    (user) => user.email.trim().toLowerCase() === normalizedEmail
-  );
+    const result = await pool.query(
+      `INSERT INTO users (email, name, hashed_password)
+       VALUES ($1, $2, $3)
+       RETURNING id, email, name`,
+      [email, value.name, hashedPassword]
+    );
 
-  if (existingUser) {
-    return res.status(400).json({
-      error: 'Email already registered',
+    const user = result.rows[0];
+    global.user_id = user.id;
+
+    return res.status(201).json({
+      name: user.name,
+      email: user.email,
     });
+  } catch (err) {
+    if (err.code === '23505') {
+      return res.status(400).json({
+        error: 'Email already registered',
+      });
+    }
+
+    return next(err);
   }
-
-  const user = {
-    id: storedUsers.length + 1,
-    name,
-    email: normalizedEmail,
-    hashedPassword: await hashPassword(password),
-  };
-
-  storedUsers.push(user);
-  global.users = storedUsers;
-
-  // Set the current user so task ownership tests can identify the user.
-  setLoggedOnUser(user);
-
-  return res.status(201).json({
-    name: user.name,
-    email: user.email,
-  });
 }
 
-async function login(req, res) {
+async function login(req, res, next) {
   const { email, password } = req.body || {};
 
   if (typeof email !== 'string' || typeof password !== 'string') {
@@ -93,36 +84,41 @@ async function login(req, res) {
     });
   }
 
-  const normalizedEmail = email.trim().toLowerCase();
+  try {
+    const normalizedEmail = email.trim().toLowerCase();
 
-  const user = storedUsers.find(
-    (item) => item.email.trim().toLowerCase() === normalizedEmail
-  );
+    const result = await pool.query(
+      'SELECT * FROM users WHERE email = $1',
+      [normalizedEmail]
+    );
 
-  const savedPassword = user
-    ? user.hashedPassword || user.password
-    : undefined;
+    if (
+      result.rows.length === 0 ||
+      !(await verifyPassword(password, result.rows[0].hashed_password))
+    ) {
+      return res.status(401).json({
+        error: 'Invalid email or password',
+      });
+    }
 
-  if (!user || !(await verifyPassword(password, savedPassword))) {
-    return res.status(401).json({
-      error: 'Invalid email or password',
+    const user = result.rows[0];
+    global.user_id = user.id;
+
+    return res.status(200).json({
+      name: user.name,
+      email: user.email,
     });
+  } catch (err) {
+    return next(err);
   }
-
-  setLoggedOnUser(user);
-
-  return res.status(200).json({
-    name: user.name,
-    email: user.email,
-  });
 }
 
-function logon(req, res) {
-  return login(req, res);
+function logon(req, res, next) {
+  return login(req, res, next);
 }
 
 function logoff(req, res) {
-  setLoggedOnUser(null);
+  global.user_id = null;
 
   return res.status(200).json({
     message: 'Logged off successfully',

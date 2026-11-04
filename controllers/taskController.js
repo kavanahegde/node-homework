@@ -1,16 +1,8 @@
 
 const { taskSchema, patchTaskSchema } = require('../validation/taskSchema');
-require('../util/memoryStore');
+const pool = require('../db/pg-pool');
 
-// Keep the counter at module level so deleting tasks does not reset IDs.
-let nextTaskId = 1;
-
-// Helper to generate a unique, incrementing task ID.
-function taskCounter() {
-  return nextTaskId++;
-}
-
-function create(req, res) {
+async function create(req, res, next) {
   const { error, value } = taskSchema.validate(req.body);
 
   if (error) {
@@ -19,37 +11,43 @@ function create(req, res) {
     });
   }
 
-  const task = {
-    id: taskCounter(),
-    title: value.title,
-    isCompleted: value.isCompleted,
-    userId: global.user_id.email,
-  };
+  try {
+    const result = await pool.query(
+      `INSERT INTO tasks (title, is_completed, user_id)
+       VALUES ($1, $2, $3)
+       RETURNING id, title, is_completed`,
+      [value.title, value.isCompleted, global.user_id]
+    );
 
-  global.tasks.push(task);
-
-  const { userId, ...responseTask } = task;
-
-  return res.status(201).json(responseTask);
-}
-
-function index(req, res) {
-  const tasks = global.tasks.filter(
-    (task) => task.userId === global.user_id.email
-  );
-
-  if (tasks.length === 0) {
-    return res.status(404).json({
-      error: 'No tasks found',
-    });
+    return res.status(201).json(result.rows[0]);
+  } catch (err) {
+    return next(err);
   }
-
-  return res.status(200).json(
-    tasks.map(({ userId, ...task }) => task)
-  );
 }
 
-function show(req, res) {
+async function index(req, res, next) {
+  try {
+    const result = await pool.query(
+      `SELECT id, title, is_completed
+       FROM tasks
+       WHERE user_id = $1
+       ORDER BY id`,
+      [global.user_id]
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: 'No tasks found',
+      });
+    }
+
+    return res.status(200).json(result.rows);
+  } catch (err) {
+    return next(err);
+  }
+}
+
+async function show(req, res, next) {
   const id = Number(req.params.id);
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -58,24 +56,27 @@ function show(req, res) {
     });
   }
 
-  const task = global.tasks.find(
-    (item) =>
-      item.id === id &&
-      item.userId === global.user_id.email
-  );
+  try {
+    const result = await pool.query(
+      `SELECT id, title, is_completed
+       FROM tasks
+       WHERE id = $1 AND user_id = $2`,
+      [id, global.user_id]
+    );
 
-  if (!task) {
-    return res.status(404).json({
-      error: 'Task not found',
-    });
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: 'Task not found',
+      });
+    }
+
+    return res.status(200).json(result.rows[0]);
+  } catch (err) {
+    return next(err);
   }
-
-  const { userId, ...responseTask } = task;
-
-  return res.status(200).json(responseTask);
 }
 
-function update(req, res) {
+async function update(req, res, next) {
   const id = Number(req.params.id);
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -92,26 +93,47 @@ function update(req, res) {
     });
   }
 
-  const task = global.tasks.find(
-    (item) =>
-      item.id === id &&
-      item.userId === global.user_id.email
-  );
+  try {
+    const updates = [];
+    const values = [];
 
-  if (!task) {
-    return res.status(404).json({
-      error: 'Task not found',
-    });
+    if (value.title !== undefined) {
+      values.push(value.title);
+      updates.push(`title = $${values.length}`);
+    }
+
+    if (value.isCompleted !== undefined) {
+      values.push(value.isCompleted);
+      updates.push(`is_completed = $${values.length}`);
+    }
+
+    values.push(id);
+    const idPosition = values.length;
+
+    values.push(global.user_id);
+    const userPosition = values.length;
+
+    const result = await pool.query(
+      `UPDATE tasks
+       SET ${updates.join(', ')}
+       WHERE id = $${idPosition} AND user_id = $${userPosition}
+       RETURNING id, title, is_completed`,
+      values
+    );
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: 'Task not found',
+      });
+    }
+
+    return res.status(200).json(result.rows[0]);
+  } catch (err) {
+    return next(err);
   }
-
-  Object.assign(task, value);
-
-  const { userId, ...responseTask } = task;
-
-  return res.status(200).json(responseTask);
 }
 
-function deleteTask(req, res) {
+async function deleteTask(req, res, next) {
   const id = Number(req.params.id);
 
   if (!Number.isInteger(id) || id <= 0) {
@@ -120,27 +142,24 @@ function deleteTask(req, res) {
     });
   }
 
-  const taskIndex = global.tasks.findIndex(
-    (item) =>
-      item.id === id &&
-      item.userId === global.user_id.email
-  );
+  try {
+    const result = await pool.query(
+      `DELETE FROM tasks
+       WHERE id = $1 AND user_id = $2
+       RETURNING id, title, is_completed`,
+      [id, global.user_id]
+    );
 
-  if (taskIndex === -1) {
-    return res.status(404).json({
-      error: 'Task not found',
-    });
+    if (result.rows.length === 0) {
+      return res.status(404).json({
+        error: 'Task not found',
+      });
+    }
+
+    return res.status(200).json(result.rows[0]);
+  } catch (err) {
+    return next(err);
   }
-
-  // Save the task before removing it from the array.
-  const task = global.tasks[taskIndex];
-
-  global.tasks.splice(taskIndex, 1);
-
-  // Exclude userId from the response.
-  const { userId, ...responseTask } = task;
-
-  return res.status(200).json(responseTask);
 }
 
 module.exports = {
