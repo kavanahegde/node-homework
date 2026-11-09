@@ -3,7 +3,7 @@ const { promisify } = require('util');
 const scrypt = promisify(crypto.scrypt);
 
 const { userSchema } = require('../validation/userSchema');
-const pool = require('../db/pg-pool');
+const prisma = require('../db/prisma');
 
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
@@ -50,14 +50,19 @@ async function register(req, res, next) {
     const hashedPassword = await hashPassword(value.password);
     const email = value.email.trim().toLowerCase();
 
-    const result = await pool.query(
-      `INSERT INTO users (email, name, hashed_password)
-       VALUES ($1, $2, $3)
-       RETURNING id, email, name`,
-      [email, value.name, hashedPassword]
-    );
+    const user = await prisma.user.create({
+      data: {
+        name: value.name,
+        email,
+        hashedPassword,
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+      },
+    });
 
-    const user = result.rows[0];
     global.user_id = user.id;
 
     return res.status(201).json({
@@ -65,7 +70,10 @@ async function register(req, res, next) {
       email: user.email,
     });
   } catch (err) {
-    if (err.code === '23505') {
+    if (
+      err.name === 'PrismaClientKnownRequestError' &&
+      err.code === 'P2002'
+    ) {
       return res.status(400).json({
         error: 'Email already registered',
       });
@@ -87,21 +95,18 @@ async function login(req, res, next) {
   try {
     const normalizedEmail = email.trim().toLowerCase();
 
-    const result = await pool.query(
-      'SELECT * FROM users WHERE email = $1',
-      [normalizedEmail]
-    );
+    const user = await prisma.user.findUnique({
+      where: {
+        email: normalizedEmail,
+      },
+    });
 
-    if (
-      result.rows.length === 0 ||
-      !(await verifyPassword(password, result.rows[0].hashed_password))
-    ) {
+    if (!user || !(await verifyPassword(password, user.hashedPassword))) {
       return res.status(401).json({
         error: 'Invalid email or password',
       });
     }
 
-    const user = result.rows[0];
     global.user_id = user.id;
 
     return res.status(200).json({
