@@ -5,6 +5,7 @@ const errorHandler = require('./middleware/error-handler');
 const timeRoutes = require('./routes/timeRoutes');
 const userRoutes = require('./routes/userRoutes');
 const taskRoutes = require('./routes/taskRoutes');
+const analyticsRoutes = require('./routes/analyticsRoutes');
 const authMiddleware = require('./middleware/auth');
 
 const app = express();
@@ -42,6 +43,7 @@ app.post('/testpost', (req, res) => {
 app.use('/api', timeRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/tasks', authMiddleware, taskRoutes);
+app.use('/api/analytics', authMiddleware, analyticsRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
@@ -72,7 +74,6 @@ if (require.main === module) {
       });
 
       console.log('HTTP server closed.');
-
 
       await prisma.$disconnect();
       console.log('Prisma disconnected.');
