@@ -87,13 +87,7 @@ async function index(req, res, next) {
       }),
     ]);
 
-    if (tasks.length === 0) {
-      return res.status(404).json({
-        error: 'No tasks found',
-      });
-    }
-
-    const pages = Math.ceil(total / limit);
+const pages = Math.ceil(total / limit);
 
     return res.status(200).json({
       tasks,
