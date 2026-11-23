@@ -1,4 +1,9 @@
 const express = require('express');
+const cookieParser = require('cookie-parser');
+const helmet = require('helmet');
+const { xss } = require('express-xss-sanitizer');
+const { rateLimit } = require('express-rate-limit');
+
 const prisma = require('./db/prisma');
 const notFound = require('./middleware/not-found');
 const errorHandler = require('./middleware/error-handler');
@@ -6,13 +11,21 @@ const timeRoutes = require('./routes/timeRoutes');
 const userRoutes = require('./routes/userRoutes');
 const taskRoutes = require('./routes/taskRoutes');
 const analyticsRoutes = require('./routes/analyticsRoutes');
-const authMiddleware = require('./middleware/auth');
+const jwtMiddleware = require('./middleware/jwtMiddleware');
 
 const app = express();
 
-global.user_id = null;
+app.set('trust proxy', 1);
 
+app.use(rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 100,
+}));
+
+app.use(helmet());
+app.use(cookieParser());
 app.use(express.json());
+app.use(xss());
 
 app.use((req, res, next) => {
   console.log(`${req.method} ${req.url}`);
@@ -20,73 +33,49 @@ app.use((req, res, next) => {
 });
 
 app.get('/', (req, res) => {
-  res.send('Hello, World!');
+  res.send('Task Manager API');
 });
 
 app.get('/health', async (req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ status: 'ok', db: 'connected' });
-  } catch (err) {
-    res.status(500).json({
-      status: 'error',
-      db: 'not connected',
-      error: err.message,
-    });
+    res.status(200).json({ status: 'ok' });
+  } catch (error) {
+    res.status(500).json({ status: 'error' });
   }
 });
 
 app.post('/testpost', (req, res) => {
-  res.status(200).json({ message: 'POST route works' });
+  res.json({ message: 'POST request received', body: req.body });
 });
 
 app.use('/api', timeRoutes);
 app.use('/api/users', userRoutes);
-app.use('/api/tasks', authMiddleware, taskRoutes);
-app.use('/api/analytics', authMiddleware, analyticsRoutes);
+app.use('/api/tasks', jwtMiddleware, taskRoutes);
+app.use('/api/analytics', jwtMiddleware, analyticsRoutes);
 
 app.use(notFound);
 app.use(errorHandler);
 
-let server;
+const PORT = process.env.PORT || 3000;
+
+const server = app.listen(PORT, () => {
+  if (require.main === module) {
+    console.log(`Server is running on port ${PORT}`);
+  }
+});
 
 if (require.main === module) {
-  const port = process.env.PORT || 3000;
+  const shutdown = async () => {
+    console.log('Shutting down server...');
 
-  server = app.listen(port, () => {
-    console.log(`Server listening on port ${port}`);
-  });
+    server.close();
+    await prisma.$disconnect();
+    process.exit(0);
+  };
 
-  let isShuttingDown = false;
-
-  async function shutdown(code = 0) {
-    if (isShuttingDown) return;
-    isShuttingDown = true;
-
-    console.log('Shutting down gracefully...');
-
-    try {
-      await new Promise((resolve, reject) => {
-        server.close((err) => {
-          if (err) reject(err);
-          else resolve();
-        });
-      });
-
-      console.log('HTTP server closed.');
-
-      await prisma.$disconnect();
-      console.log('Prisma disconnected.');
-    } catch (err) {
-      console.error('Error during shutdown:', err);
-      code = 1;
-    } finally {
-      process.exit(code);
-    }
-  }
-
-  process.on('SIGINT', () => shutdown(0));
-  process.on('SIGTERM', () => shutdown(0));
+  process.on('SIGINT', shutdown);
+  process.on('SIGTERM', shutdown);
 }
 
 module.exports = { app, server };

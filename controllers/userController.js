@@ -1,19 +1,44 @@
 const crypto = require('crypto');
+const { randomUUID } = require('crypto');
+const jwt = require('jsonwebtoken');
 const { promisify } = require('util');
 const scrypt = promisify(crypto.scrypt);
-
 const { userSchema } = require('../validation/userSchema');
 const prisma = require('../db/prisma');
+
+const cookieFlags = (req) => {
+  return {
+    httpOnly: true,
+    secure: process.env.NODE_ENV === 'production',
+    sameSite: 'Strict',
+  };
+};
+
+const setJwtCookie = (req, res, user) => {
+  const payload = { id: user.id, csrfToken: randomUUID() };
+  const token = jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: '1h',
+  });
+
+  res.cookie('jwt', token, {
+    ...cookieFlags(req),
+    maxAge: 3600000,
+  });
+
+  return payload.csrfToken;
+};
 
 async function hashPassword(password) {
   const salt = crypto.randomBytes(16).toString('hex');
   const key = await scrypt(password, salt, 64);
-
   return `${salt}:${key.toString('hex')}`;
 }
 
 async function verifyPassword(password, storedPassword) {
-  if (typeof storedPassword !== 'string' || !storedPassword.includes(':')) {
+  if (
+    typeof storedPassword !== 'string' ||
+    !storedPassword.includes(':')
+  ) {
     return false;
   }
 
@@ -110,10 +135,13 @@ async function register(req, res, next) {
       return { user, welcomeTasks };
     });
 
-    global.user_id = result.user.id;
+    const csrfToken = setJwtCookie(req, res, result.user);
 
     return res.status(201).json({
       user: result.user,
+      name: result.user.name,
+      email: result.user.email,
+      csrfToken,
       welcomeTasks: result.welcomeTasks,
       transactionStatus: 'success',
     });
@@ -152,11 +180,12 @@ async function login(req, res, next) {
       });
     }
 
-    global.user_id = user.id;
+    const csrfToken = setJwtCookie(req, res, user);
 
     return res.status(200).json({
       name: user.name,
       email: user.email,
+      csrfToken,
     });
   } catch (err) {
     return next(err);
@@ -168,7 +197,7 @@ function logon(req, res, next) {
 }
 
 function logoff(req, res) {
-  global.user_id = null;
+  res.clearCookie('jwt', cookieFlags(req));
 
   return res.status(200).json({
     message: 'Logged off successfully',
